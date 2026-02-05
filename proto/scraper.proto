@@ -1,0 +1,271 @@
+syntax = "proto3";
+
+package scraper;
+
+// Web Scraper Service gRPC definitions (Phase 1 + scaffolding for Phase 2).
+//
+// IMPORTANT (roles):
+// - This is an internal microservice. The gRPC "client" is an internal backend gateway (or another backend),
+//   which prepares the full request payload and triggers jobs.
+// - End users do NOT call this service directly.
+//
+// Streaming is used for progress updates as jobs may be long-running.
+
+service WebScraperService {
+  // Phase 1: Configured scraping (stream progress updates).
+  rpc ScrapeConfigured(ScrapeConfiguredRequest) returns (stream ScrapeProgress);
+
+  // Optional: query job status after a stream disconnects.
+  rpc GetJobStatus(GetJobStatusRequest) returns (JobStatusResponse);
+
+  // Phase 2: Autonomous discovery (discover structure only; requires approval before scraping).
+  rpc DiscoverStructure(AutonomousScrapeRequest) returns (stream DiscoveryProgress);
+  rpc GetDiscoveredStructure(GetDiscoveredStructureRequest) returns (DiscoveredStructureResponse);
+  rpc ApproveAndScrape(ApproveAndScrapeRequest) returns (stream ScrapeProgress);
+
+  // Phase 3: LLM-guided agentic browsing (collect relevant URLs, then scrape via Phase 1 pipeline).
+  rpc ScrapePhase3(Phase3ScrapeRequest) returns (stream ScrapeProgress);
+}
+
+message ScrapeConfiguredRequest {
+  // Optional: client-provided job_id. If empty, server generates.
+  string job_id = 1;
+
+  // Optional: internal client identifier (gateway/service client) for observability/rate limiting.
+  string client_id = 2;
+
+  // JSON configuration (required).
+  // Must follow the structure described in the service design docs:
+  // base_url + structure + options.
+  string config_json = 3;
+}
+
+// ---------------------------
+// Phase 3: Agentic browsing
+// ---------------------------
+message Phase3ScrapeRequest {
+  // Optional: client-provided job_id. If empty, server generates.
+  string job_id = 1;
+
+  // Optional: internal client identifier (gateway/service client) for observability/rate limiting.
+  string client_id = 2;
+
+  // Base URL of the docs site (required).
+  string base_url = 3;
+
+  // Natural language prompt (required).
+  string prompt = 4;
+
+  AgentOptions agent_options = 5;
+  LLMOptions llm_options = 6;
+  ScrapingOptions scraping_options = 7;
+}
+
+message AgentOptions {
+  int32 max_depth = 1;
+  int32 max_pages = 2;
+  repeated string allowed_domains = 3;
+  repeated string exclude_patterns = 4;
+}
+
+// ---------------------------
+// Phase 2: Autonomous discovery
+// ---------------------------
+
+message AutonomousScrapeRequest {
+  // Optional: client-provided job_id. If empty, server generates.
+  string job_id = 1;
+
+  // Optional: internal client identifier (gateway/service client) for observability/rate limiting.
+  string client_id = 2;
+
+  // Base URL of the docs site to analyze (required).
+  string base_url = 3;
+
+  DiscoveryOptions discovery_options = 4;
+  LLMOptions llm_options = 5;
+  ScrapingOptions scraping_options = 6;
+}
+
+message DiscoveryOptions {
+  int32 max_depth = 1;
+  int32 max_pages = 2;
+  repeated string allowed_domains = 3;
+  repeated string exclude_patterns = 4;
+  // Optional: discovery-time quality gates (Phase 2).
+  // System-level caps always apply even if client provides lower thresholds.
+  QualityThresholds quality_thresholds = 5;
+}
+
+message QualityThresholds {
+  int32 min_word_count = 1;
+  float min_text_to_html_ratio = 2;
+}
+
+message LLMOptions {
+  // Phase 2 currently supports ollama; field allows future expansion.
+  string provider = 1; // "ollama"
+  string model = 2; // default: "qwen2.5:3b"
+  float temperature = 3;
+  int32 max_tokens = 4;
+  int32 timeout_seconds = 5;
+}
+
+message ScrapingOptions {
+  // Same semantics as Phase 1 JSON options.
+  string output_format = 1; // "pdf" | "docx" | "both"
+  bool include_images = 2;
+  string image_handling = 3; // "embed" | "link_only" | "both" | "embed_or_link"
+  repeated string noise_selectors = 4;
+  bool include_metadata = 5;
+}
+
+enum DiscoveryStage {
+  DISCOVERY_STAGE_UNSPECIFIED = 0;
+  DISCOVERY_STAGE_VALIDATING = 1;
+  DISCOVERY_STAGE_CRAWLING = 2;
+  DISCOVERY_STAGE_SUMMARIZING = 3;
+  DISCOVERY_STAGE_LLM_ANALYZING = 4;
+  DISCOVERY_STAGE_READY_FOR_APPROVAL = 5;
+  DISCOVERY_STAGE_FAILED = 6;
+}
+
+message DiscoveryProgress {
+  string job_id = 1;
+  DiscoveryStage stage = 2;
+  string message = 3;
+
+  string current_url = 4;
+  int32 pages_crawled = 5;
+  int32 max_pages = 6;
+
+  // Present only when stage READY_FOR_APPROVAL.
+  string discovered_structure_json = 7;
+
+  // Errors (if stage FAILED)
+  ErrorCode error_code = 8;
+  string error_message = 9;
+
+  // Stream control
+  bool is_complete = 10;
+  bool success = 11;
+}
+
+message GetDiscoveredStructureRequest {
+  string job_id = 1;
+}
+
+message DiscoveredStructureResponse {
+  string job_id = 1;
+  bool success = 2;
+  string error_message = 3;
+
+  string base_url = 4;
+  string discovered_structure_json = 5;
+  bool approved = 6;
+  string approved_structure_json = 7;
+
+  // LLM metadata
+  string llm_provider = 8;
+  string llm_model = 9;
+
+  // Phase 2: the scraping options that will be used when running ApproveAndScrape.
+  // This includes any server-side merged noise selectors suggested by the LLM.
+  string scraping_options_json = 10;
+}
+
+message ApproveAndScrapeRequest {
+  string job_id = 1;
+  // If provided, this structure will be used instead of the originally discovered structure.
+  string approved_structure_json = 2;
+}
+
+message GetJobStatusRequest {
+  string job_id = 1;
+}
+
+message JobStatusResponse {
+  string job_id = 1;
+  JobStatus status = 2;
+  bool success = 3;
+  string error_message = 4;
+  ProcessingStats stats = 5;
+  repeated ProcessedDocument documents = 6;
+}
+
+enum JobStatus {
+  JOB_STATUS_UNSPECIFIED = 0;
+  JOB_STATUS_PENDING = 1;
+  JOB_STATUS_RUNNING = 2;
+  JOB_STATUS_COMPLETED = 3;
+  JOB_STATUS_FAILED = 4;
+  JOB_STATUS_CANCELLED = 5;
+}
+
+enum ProgressStage {
+  PROGRESS_STAGE_UNSPECIFIED = 0;
+  PROGRESS_STAGE_VALIDATING = 1;
+  PROGRESS_STAGE_INITIALIZING = 2;
+  PROGRESS_STAGE_SCRAPING = 3;
+  PROGRESS_STAGE_FILTERING = 4;
+  PROGRESS_STAGE_GENERATING = 5;
+  PROGRESS_STAGE_UPLOADING = 6;
+  PROGRESS_STAGE_PERSISTING = 7;
+  PROGRESS_STAGE_COMPLETED = 8;
+  PROGRESS_STAGE_FAILED = 9;
+}
+
+enum ErrorCode {
+  ERROR_CODE_UNSPECIFIED = 0;
+  ERROR_CODE_INVALID_INPUT = 1;
+  ERROR_CODE_INVALID_URL = 2;
+  ERROR_CODE_NETWORK_TIMEOUT = 3;
+  ERROR_CODE_RATE_LIMIT_EXCEEDED = 4;
+  ERROR_CODE_CONTENT_PROCESSING_ERROR = 5;
+  ERROR_CODE_STORAGE_ERROR = 6;
+  ERROR_CODE_DATABASE_ERROR = 7;
+  ERROR_CODE_INTERNAL_ERROR = 8;
+}
+
+message ScrapeProgress {
+  string job_id = 1;
+  ProgressStage stage = 2;
+  string message = 3;
+
+  // Per-document progress
+  string current_url = 4;
+  int32 current_index = 5;
+  int32 total_documents = 6;
+
+  // Result of the most recently processed document (if any)
+  ProcessedDocument last_document = 7;
+
+  // Errors (if stage FAILED or per-document error)
+  ErrorCode error_code = 8;
+  string error_message = 9;
+
+  // Summary
+  ProcessingStats stats = 10;
+
+  // Stream control
+  bool is_complete = 11;
+  bool success = 12;
+}
+
+message ProcessingStats {
+  int32 total_pages_processed = 1;
+  int32 successful_pages = 2;
+  int32 failed_pages = 3;
+  int64 total_processing_time_ms = 4;
+}
+
+message ProcessedDocument {
+  string minio_path = 1;
+  string source_url = 2;
+  int64 file_size_bytes = 3;
+  string content_type = 4;
+  int64 processing_time_ms = 5;
+  string output_format = 6; // "pdf" | "docx"
+}
+
+
